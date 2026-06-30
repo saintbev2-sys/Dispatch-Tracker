@@ -1,0 +1,640 @@
+import React, { useState, useEffect, useRef } from "react";
+
+const GOAL = 40;
+const BASE_MIN_ORDER = 7;
+const BASE_MAX_MILES = 4;
+const BASE_MIN_PER_MILE = 2;
+
+const HUBS = ["Hub A \u2014 Sandy", "Hub B \u2014 Midvale", "Hub C \u2014 Draper"];
+
+const RESTAURANT_TYPES = [
+  { id: "drivethru", label: "24/7 Drive-thru" },
+  { id: "sitdown", label: "Denny's / Sit-down" },
+  { id: "gas", label: "Gas station" },
+  { id: "gated", label: "Gated apt" },
+];
+
+// Surge tiers: how each tier loosens the distance cap and lowers the $/mile floor.
+// Higher surge = more orders incoming, so it's worth chasing slightly thinner per-mile
+// math and a bit more distance, because the volume covers the slack.
+const SURGE_TIERS = {
+  cold: { label: "Cold", icon: "\u2014", color: "#5b6470", milesMult: 1, perMileMult: 1 },
+  normal: { label: "Normal", icon: "\u25b3", color: "#ffb020", milesMult: 1.1, perMileMult: 0.95 },
+  hot: { label: "Hot \u00d72", icon: "\u25b3\u25b3", color: "#ff7a1a", perMileMult: 0.85, milesMult: 1.25 },
+};
+
+function getEffectiveRules(surgeKey) {
+  const tier = SURGE_TIERS[surgeKey] || SURGE_TIERS.cold;
+  return {
+    minOrder: BASE_MIN_ORDER, // base order minimum doesn't loosen \u2014 still a floor
+    maxMiles: +(BASE_MAX_MILES * tier.milesMult).toFixed(1),
+    minPerMile: +(BASE_MIN_PER_MILE * tier.perMileMult).toFixed(2),
+  };
+}
+
+function evaluateOrder({ amount, miles, type, surgeKey = "cold" }) {
+  const rules = getEffectiveRules(surgeKey);
+  const perMile = miles > 0 ? amount / miles : amount;
+  const reasons = [];
+  let verdict = "ACCEPT";
+
+  if (amount < rules.minOrder) {
+    verdict = "DECLINE";
+    reasons.push(`Below $${rules.minOrder} minimum`);
+  }
+  if (miles > rules.maxMiles) {
+    verdict = "DECLINE";
+    reasons.push(`Over ${rules.maxMiles} mi cap`);
+  }
+  if (perMile < rules.minPerMile) {
+    verdict = "DECLINE";
+    reasons.push(`Under $${rules.minPerMile}/mi`);
+  }
+  if (type === "gas" && amount < 10) {
+    verdict = "DECLINE";
+    reasons.push("Gas station under $10");
+  }
+  if (type === "gated" && perMile < rules.minPerMile * 1.3) {
+    verdict = "DECLINE";
+    reasons.push("Gated apt, not worth the walk");
+  }
+
+  if (verdict === "ACCEPT" && reasons.length === 0) {
+    reasons.push("Clears every rule");
+  }
+
+  return { verdict, perMile, reasons, rules };
+}
+
+function StatPod({ value, label, accent }) {
+  return (
+    <div
+      style={{
+        background: "#161c24",
+        border: "1px solid #232b36",
+        borderRadius: 18,
+        padding: "14px 18px",
+        flex: 1,
+        minWidth: 0,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 30,
+          fontWeight: 800,
+          color: accent || "#f5f7fa",
+          fontVariantNumeric: "tabular-nums",
+          lineHeight: 1.1,
+        }}
+      >
+        {value}
+      </div>
+      <div style={{ fontSize: 11, color: "#9aa5b1", marginTop: 4, letterSpacing: 0.4, textTransform: "uppercase" }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function GaugeRing({ pct, earned }) {
+  const r = 64;
+  const c = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(1, pct));
+  const offset = c * (1 - clamped);
+  const color = earned >= GOAL ? "#3ddc84" : earned >= GOAL * 0.6 ? "#ffb020" : "#5b9dff";
+
+  return (
+    <div style={{ position: "relative", width: 160, height: 160, margin: "0 auto" }}>
+      <svg width="160" height="160" style={{ transform: "rotate(-90deg)" }}>
+        <circle cx="80" cy="80" r={r} stroke="#1e2630" strokeWidth="12" fill="none" />
+        <circle
+          cx="80"
+          cy="80"
+          r={r}
+          stroke={color}
+          strokeWidth="12"
+          fill="none"
+          strokeDasharray={c}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dashoffset 0.5s ease, stroke 0.5s ease" }}
+        />
+      </svg>
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div style={{ fontSize: 36, fontWeight: 800, color: "#f5f7fa", fontVariantNumeric: "tabular-nums" }}>
+          ${earned.toFixed(0)}
+        </div>
+        <div style={{ fontSize: 11, color: "#9aa5b1", letterSpacing: 0.5 }}>OF ${GOAL} GOAL</div>
+      </div>
+    </div>
+  );
+}
+
+function Pill({ children, color }) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "4px 10px",
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.4,
+        color: "#0a0d12",
+        background: color,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function SegButton({ active, onClick, children, full }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "10px 14px",
+        borderRadius: 12,
+        border: active ? "1px solid #5b9dff" : "1px solid #232b36",
+        background: active ? "#1b2840" : "#161c24",
+        color: active ? "#9dc1ff" : "#cdd5df",
+        fontSize: 13,
+        fontWeight: 700,
+        cursor: "pointer",
+        flex: full ? 1 : "0 0 auto",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function DispatchGame() {
+  const [tab, setTab] = useState("shift"); // shift | practice | log
+  const [orders, setOrders] = useState([]); // {amount, miles, type, accepted, ts, matchedRule}
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
+  const [xp, setXp] = useState(0);
+
+  const [amount, setAmount] = useState("");
+  const [miles, setMiles] = useState("");
+  const [type, setType] = useState("drivethru");
+  const [hub, setHub] = useState(0);
+  const [hubSurge, setHubSurge] = useState({ 0: "cold", 1: "cold", 2: "cold" });
+  const [practiceResult, setPracticeResult] = useState(null);
+  const [practiceSurge, setPracticeSurge] = useState("cold");
+  const [loaded, setLoaded] = useState(false);
+
+  const surgeKey = hubSurge[hub] || "cold";
+  const effectiveRules = getEffectiveRules(surgeKey);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage?.get("dispatch_state_v1", false);
+        if (res?.value) {
+          const parsed = JSON.parse(res.value);
+          setOrders(parsed.orders || []);
+          setStreak(parsed.streak || 0);
+          setBestStreak(parsed.bestStreak || 0);
+          setXp(parsed.xp || 0);
+          setHubSurge(parsed.hubSurge || { 0: "cold", 1: "cold", 2: "cold" });
+        }
+      } catch (e) {
+        // no saved state yet
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        await window.storage?.set(
+          "dispatch_state_v1",
+          JSON.stringify({ orders, streak, bestStreak, xp, hubSurge }),
+          false
+        );
+      } catch (e) {
+        // storage unavailable
+      }
+    })();
+  }, [orders, streak, bestStreak, xp, hubSurge, loaded]);
+
+  const earned = orders.filter((o) => o.accepted).reduce((sum, o) => sum + o.amount, 0);
+  const pct = earned / GOAL;
+  const acceptedCount = orders.filter((o) => o.accepted).length;
+  const declinedCount = orders.filter((o) => !o.accepted).length;
+  const avgPerMile =
+    acceptedCount > 0
+      ? orders.filter((o) => o.accepted).reduce((s, o) => s + (o.miles > 0 ? o.amount / o.miles : o.amount), 0) /
+        acceptedCount
+      : 0;
+
+  function resetForm() {
+    setAmount("");
+    setMiles("");
+    setType("drivethru");
+  }
+
+  function logRealOrder(accepted) {
+    const amt = parseFloat(amount);
+    const mi = parseFloat(miles);
+    if (isNaN(amt) || isNaN(mi)) return;
+    const evalResult = evaluateOrder({ amount: amt, miles: mi, type, surgeKey });
+    const matchedRule = accepted === (evalResult.verdict === "ACCEPT");
+
+    setOrders((prev) => [
+      ...prev,
+      { amount: amt, miles: mi, type, hub, accepted, ts: Date.now(), matchedRule, surgeKey },
+    ]);
+
+    if (matchedRule) {
+      setStreak((s) => {
+        const next = s + 1;
+        setBestStreak((b) => Math.max(b, next));
+        return next;
+      });
+      setXp((x) => x + (accepted ? 10 : 5));
+    } else {
+      setStreak(0);
+      setXp((x) => x + (accepted ? 2 : 0));
+    }
+
+    resetForm();
+  }
+
+  function runPractice(choice) {
+    const amt = parseFloat(amount);
+    const mi = parseFloat(miles);
+    if (isNaN(amt) || isNaN(mi)) return;
+    const evalResult = evaluateOrder({ amount: amt, miles: mi, type, surgeKey: practiceSurge });
+    const correct = choice === evalResult.verdict;
+    setPracticeResult({ ...evalResult, choice, correct, amt, mi });
+    if (correct) {
+      setXp((x) => x + 8);
+      setStreak((s) => {
+        const next = s + 1;
+        setBestStreak((b) => Math.max(b, next));
+        return next;
+      });
+    } else {
+      setStreak(0);
+    }
+  }
+
+  function nextPracticeRound() {
+    setPracticeResult(null);
+    const amt = (Math.random() * 22 + 4).toFixed(2);
+    const mi = (Math.random() * 6 + 0.5).toFixed(1);
+    const types = RESTAURANT_TYPES.map((t) => t.id);
+    const t = types[Math.floor(Math.random() * types.length)];
+    const surgeKeys = Object.keys(SURGE_TIERS);
+    const s = surgeKeys[Math.floor(Math.random() * surgeKeys.length)];
+    setAmount(amt);
+    setMiles(mi);
+    setType(t);
+    setPracticeSurge(s);
+  }
+
+  useEffect(() => {
+    if (tab === "practice" && !amount) nextPracticeRound();
+    // eslint-disable-next-line
+  }, [tab]);
+
+  const tabBtnStyle = (active) => ({
+    flex: 1,
+    padding: "12px 0",
+    background: "transparent",
+    border: "none",
+    borderBottom: active ? "3px solid #5b9dff" : "3px solid transparent",
+    color: active ? "#f5f7fa" : "#7c8794",
+    fontSize: 13,
+    fontWeight: 800,
+    letterSpacing: 0.5,
+    cursor: "pointer",
+  });
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#0a0d12",
+        color: "#f5f7fa",
+        fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        padding: "18px 14px 40px",
+      }}
+    >
+      <div style={{ width: "100%", maxWidth: 480 }}>
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ fontSize: 11, color: "#ffb020", fontWeight: 800, letterSpacing: 2 }}>
+            SHIFT GAUGE
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 800, marginTop: 2 }}>Dispatch Tracker</div>
+        </div>
+
+        <GaugeRing pct={pct} earned={earned} />
+
+        {earned >= GOAL && (
+          <div style={{ textAlign: "center", marginTop: 10, color: "#3ddc84", fontWeight: 800, fontSize: 14 }}>
+            GOAL HIT \u2014 cash out now
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+          <StatPod value={acceptedCount} label="Accepted" accent="#3ddc84" />
+          <StatPod value={declinedCount} label="Declined" accent="#ff5454" />
+          <StatPod value={streak} label="Streak" accent="#ffb020" />
+        </div>
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+          <StatPod value={`$${avgPerMile.toFixed(2)}`} label="Avg $/mi" />
+          <StatPod value={bestStreak} label="Best streak" />
+          <StatPod value={xp} label="XP" accent="#5b9dff" />
+        </div>
+
+        <div style={{ display: "flex", marginTop: 22, borderBottom: "1px solid #1e2630" }}>
+          <button style={tabBtnStyle(tab === "shift")} onClick={() => setTab("shift")}>
+            LOG SHIFT
+          </button>
+          <button style={tabBtnStyle(tab === "practice")} onClick={() => setTab("practice")}>
+            PRACTICE
+          </button>
+          <button style={tabBtnStyle(tab === "log")} onClick={() => setTab("log")}>
+            HISTORY
+          </button>
+        </div>
+
+        {tab === "shift" && (
+          <div style={{ marginTop: 18 }}>
+            <div style={{ fontSize: 12, color: "#9aa5b1", marginBottom: 10 }}>
+              Got a real order ping? Enter it, then tell me what you actually did.
+            </div>
+
+            <Field label="Order amount ($)">
+              <input
+                type="number"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="9.50"
+                style={inputStyle}
+              />
+            </Field>
+            <Field label="Distance (miles)">
+              <input
+                type="number"
+                inputMode="decimal"
+                value={miles}
+                onChange={(e) => setMiles(e.target.value)}
+                placeholder="2.3"
+                style={inputStyle}
+              />
+            </Field>
+            <Field label="Type">
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {RESTAURANT_TYPES.map((t) => (
+                  <SegButton key={t.id} active={type === t.id} onClick={() => setType(t.id)}>
+                    {t.label}
+                  </SegButton>
+                ))}
+              </div>
+            </Field>
+            <Field label="Hub">
+              <div style={{ display: "flex", gap: 8 }}>
+                {HUBS.map((h, i) => (
+                  <SegButton key={h} active={hub === i} onClick={() => setHub(i)} full>
+                    {h.split(" \u2014 ")[0]}
+                  </SegButton>
+                ))}
+              </div>
+            </Field>
+            <Field label="Surge right now (check the app)">
+              <div style={{ display: "flex", gap: 8 }}>
+                {Object.entries(SURGE_TIERS).map(([key, t]) => (
+                  <button
+                    key={key}
+                    onClick={() => setHubSurge((prev) => ({ ...prev, [hub]: key }))}
+                    style={{
+                      flex: 1,
+                      padding: "10px 6px",
+                      borderRadius: 12,
+                      border: surgeKey === key ? `1px solid ${t.color}` : "1px solid #232b36",
+                      background: surgeKey === key ? `${t.color}22` : "#161c24",
+                      color: surgeKey === key ? t.color : "#cdd5df",
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t.icon} {t.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: "#7c8794", marginTop: 6 }}>
+                {HUBS[hub].split(" \u2014 ")[0]} rules right now: ${effectiveRules.minOrder} min \u00b7 {effectiveRules.maxMiles} mi cap \u00b7 ${effectiveRules.minPerMile}/mi floor
+              </div>
+            </Field>
+
+            {amount && miles && !isNaN(parseFloat(amount)) && !isNaN(parseFloat(miles)) && (
+              <RuleHint amount={parseFloat(amount)} miles={parseFloat(miles)} type={type} surgeKey={surgeKey} />
+            )}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <button
+                onClick={() => logRealOrder(true)}
+                disabled={!amount || !miles}
+                style={{ ...actionBtn, background: "#3ddc84", color: "#0a0d12", opacity: !amount || !miles ? 0.4 : 1 }}
+              >
+                I ACCEPTED
+              </button>
+              <button
+                onClick={() => logRealOrder(false)}
+                disabled={!amount || !miles}
+                style={{ ...actionBtn, background: "#ff5454", color: "#0a0d12", opacity: !amount || !miles ? 0.4 : 1 }}
+              >
+                I DECLINED
+              </button>
+            </div>
+          </div>
+        )}
+
+        {tab === "practice" && (
+          <div style={{ marginTop: 18 }}>
+            <div style={{ fontSize: 12, color: "#9aa5b1", marginBottom: 10 }}>
+              Practice round. Read the order, call it before you check.
+            </div>
+
+            <div
+              style={{
+                background: "#161c24",
+                border: "1px solid #232b36",
+                borderRadius: 16,
+                padding: 18,
+                marginBottom: 14,
+              }}
+            >
+              <div style={{ fontSize: 32, fontWeight: 800 }}>${amount}</div>
+              <div style={{ fontSize: 13, color: "#9aa5b1", marginTop: 2 }}>
+                {miles} mi \u00b7 {RESTAURANT_TYPES.find((t) => t.id === type)?.label}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <Pill color={SURGE_TIERS[practiceSurge].color}>
+                  {SURGE_TIERS[practiceSurge].icon} {SURGE_TIERS[practiceSurge].label} zone
+                </Pill>
+              </div>
+            </div>
+
+            {!practiceResult ? (
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => runPractice("ACCEPT")} style={{ ...actionBtn, background: "#3ddc84", color: "#0a0d12" }}>
+                  ACCEPT
+                </button>
+                <button onClick={() => runPractice("DECLINE")} style={{ ...actionBtn, background: "#ff5454", color: "#0a0d12" }}>
+                  DECLINE
+                </button>
+              </div>
+            ) : (
+              <div>
+                <div
+                  style={{
+                    padding: 14,
+                    borderRadius: 14,
+                    background: practiceResult.correct ? "#103022" : "#3a1414",
+                    border: `1px solid ${practiceResult.correct ? "#3ddc84" : "#ff5454"}`,
+                    marginBottom: 12,
+                  }}
+                >
+                  <div style={{ fontWeight: 800, color: practiceResult.correct ? "#3ddc84" : "#ff5454", marginBottom: 6 }}>
+                    {practiceResult.correct ? "Correct call" : "Wrong call"}
+                  </div>
+                  <div style={{ fontSize: 13, color: "#cdd5df" }}>
+                    Rule says <Pill color={practiceResult.verdict === "ACCEPT" ? "#3ddc84" : "#ff5454"}>{practiceResult.verdict}</Pill>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#9aa5b1", marginTop: 8 }}>
+                    {practiceResult.reasons.join(" \u00b7 ")} \u00b7 ${practiceResult.perMile.toFixed(2)}/mi
+                  </div>
+                </div>
+                <button onClick={nextPracticeRound} style={{ ...actionBtn, background: "#5b9dff", color: "#0a0d12", width: "100%" }}>
+                  NEXT ORDER
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "log" && (
+          <div style={{ marginTop: 18 }}>
+            {orders.length === 0 ? (
+              <div style={{ color: "#7c8794", fontSize: 13, textAlign: "center", padding: "30px 0" }}>
+                Nothing logged yet tonight.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[...orders].reverse().map((o, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      background: "#161c24",
+                      border: "1px solid #232b36",
+                      borderRadius: 12,
+                      padding: "10px 14px",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 800, fontSize: 15 }}>${o.amount.toFixed(2)}</div>
+                      <div style={{ fontSize: 11, color: "#9aa5b1" }}>
+                        {o.miles} mi \u00b7 {HUBS[o.hub]?.split(" \u2014 ")[0]}
+                        {o.surgeKey && o.surgeKey !== "cold" ? ` \u00b7 ${SURGE_TIERS[o.surgeKey].icon} ${SURGE_TIERS[o.surgeKey].label}` : ""}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      {!o.matchedRule && <Pill color="#ffb020">OFF-RULE</Pill>}
+                      <Pill color={o.accepted ? "#3ddc84" : "#ff5454"}>{o.accepted ? "TOOK" : "SKIPPED"}</Pill>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ textAlign: "center", marginTop: 26, fontSize: 10.5, color: "#5b6470" }}>
+          No live Uber/Instacart connection \u2014 you log it, the gauge tracks it.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, color: "#9aa5b1", marginBottom: 6, letterSpacing: 0.4, textTransform: "uppercase" }}>
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function RuleHint({ amount, miles, type, surgeKey = "cold" }) {
+  const r = evaluateOrder({ amount, miles, type, surgeKey });
+  return (
+    <div
+      style={{
+        marginTop: 4,
+        marginBottom: 4,
+        padding: "10px 12px",
+        borderRadius: 10,
+        background: r.verdict === "ACCEPT" ? "#103022" : "#3a1414",
+        border: `1px solid ${r.verdict === "ACCEPT" ? "#3ddc84" : "#ff5454"}`,
+        fontSize: 12,
+      }}
+    >
+      <Pill color={r.verdict === "ACCEPT" ? "#3ddc84" : "#ff5454"}>RULE SAYS {r.verdict}</Pill>
+      <span style={{ color: "#9aa5b1", marginLeft: 8 }}>
+        ${r.perMile.toFixed(2)}/mi \u00b7 {r.reasons.join(" \u00b7 ")}
+      </span>
+    </div>
+  );
+}
+
+const inputStyle = {
+  width: "100%",
+  padding: "12px 14px",
+  borderRadius: 12,
+  border: "1px solid #232b36",
+  background: "#0e1319",
+  color: "#f5f7fa",
+  fontSize: 16,
+  outline: "none",
+  boxSizing: "border-box",
+};
+
+const actionBtn = {
+  flex: 1,
+  padding: "16px 0",
+  borderRadius: 14,
+  border: "none",
+  fontSize: 14,
+  fontWeight: 800,
+  letterSpacing: 0.5,
+  cursor: "pointer",
+};
